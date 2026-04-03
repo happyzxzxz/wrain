@@ -1,4 +1,4 @@
 /target
-Cargo.lock
 flake.lock
 .env
+/result

@@ -4,19 +4,40 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        runtimeLibs = with pkgs; [
-          libGL libxkbcommon wayland vulkan-loader alsa-lib
-        ];
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [ pkg-config cargo rustc ];
-          buildInputs = runtimeLibs;
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
+      in {
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          pname = "wrain";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+
+          nativeBuildInputs = [ 
+            pkgs.pkg-config 
+            pkgs.makeWrapper 
+          ];
+
+          buildInputs = [ 
+            pkgs.wayland 
+            pkgs.libxkbcommon 
+            pkgs.libGL 
+            pkgs.vulkan-loader 
+            pkgs.alsa-lib 
+          ];
+
+          postInstall = ''
+            mkdir -p $out/bin/assets
+            cp -r assets/* $out/bin/assets/
+
+            wrapProgram $out/bin/wrain \
+              --set WRAIN_ASSET_PATH "$out/bin/assets" \
+              --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [ 
+                pkgs.wayland pkgs.libxkbcommon pkgs.libGL pkgs.vulkan-loader pkgs.alsa-lib 
+              ]}
+          '';
         };
       });
 }

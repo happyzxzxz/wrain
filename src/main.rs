@@ -13,6 +13,7 @@ use rand::{thread_rng, Rng};
 use rodio::{Decoder, OutputStream, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "GPU Accelerated Rain Wallpaper for Wayland")]
@@ -31,6 +32,9 @@ struct Config {
 
     #[arg(long, default_value_t = 0.3)]
     volume: f32,
+
+    #[arg(long)]
+    asset_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -44,7 +48,7 @@ pub fn main() -> Result<(), iced_layershell::Error> {
         .subscription(subscription)
         .settings(Settings {
             layer_settings: LayerShellSettings {
-                layer: Layer::Bottom, // Above wallpaper, below windows
+                layer: Layer::Bottom,
                 anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
                 size: None,
                 exclusive_zone: -1,
@@ -64,6 +68,8 @@ struct State {
     wind_force: f32,
     wind_target: f32,
     lightning: Option<LightningStrike>,
+
+    asset_root: PathBuf,
 
     _audio_stream: Option<OutputStream>,
     stream_handle: Option<rodio::OutputStreamHandle>,
@@ -86,7 +92,7 @@ impl RainDrop {
     fn update(&mut self, width: f32, height: f32, wind: f32, mode: Mode) {
         let wind_mult = if mode == Mode::Thunderstorm { 0.12 } else { 0.03 };
         self.vx += (wind / self.mass) * wind_mult;
-        self.vx *= 0.96; // Air resistance
+        self.vx *= 0.96;
         self.x += self.vx;
         self.y += self.vy;
 
@@ -95,7 +101,6 @@ impl RainDrop {
         if self.y > height {
             self.y = -20.0;
             self.x = thread_rng().gen_range(0.0..width);
-            // Slight splash inertia
             self.vx += thread_rng().gen_range(-1.0..1.0);
         }
     }
@@ -107,10 +112,15 @@ enum Message {
     Tick(Instant),
 }
 
-
 fn init(config: Config) -> (State, Task<Message>) {
     let mode = if config.mode == "thunderstorm" { Mode::Thunderstorm } else { Mode::Basic };
     
+    let asset_root = PathBuf::from(
+        config.asset_path.clone()
+            .or_else(|| std::env::var("WRAIN_ASSET_PATH").ok())
+            .unwrap_or_else(|| "assets".to_string())
+    );
+
     // Audio Setup
     let mut _audio_stream = None;
     let mut stream_handle = None;
@@ -119,7 +129,11 @@ fn init(config: Config) -> (State, Task<Message>) {
     if !config.no_sound {
         if let Ok((stream, handle)) = OutputStream::try_default() {
             let sink = Sink::try_new(&handle).unwrap();
-            if let Ok(file) = File::open("assets/rain_loop.mp3") {
+            
+            // Construct path dynamically
+            let rain_file = asset_root.join("rain_loop.mp3");
+            
+            if let Ok(file) = File::open(rain_file) {
                 let source = Decoder::new(BufReader::new(file)).unwrap().repeat_infinite();
                 sink.append(source);
                 sink.set_volume(if mode == Mode::Thunderstorm { config.volume * 1.5 } else { config.volume });
@@ -131,7 +145,6 @@ fn init(config: Config) -> (State, Task<Message>) {
         }
     }
 
-    // Rain Setup
     let drops = (0..config.rain_density).map(|_| RainDrop {
         x: thread_rng().gen_range(0.0..2000.0),
         y: thread_rng().gen_range(0.0..1100.0),
@@ -142,6 +155,7 @@ fn init(config: Config) -> (State, Task<Message>) {
 
     (State { 
         config, mode, drops, wind_force: 0.0, wind_target: 0.0, lightning: None,
+        asset_root,
         _audio_stream, stream_handle, rain_sink,
     }, Task::none())
 }
@@ -151,27 +165,27 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Tick(_) => {
             let mut rng = thread_rng();
             
-            // 1. Organic Wind Logic (Random Walk)
+            // 1. Organic Wind Logic
             let wind_limit = if state.mode == Mode::Thunderstorm { 6.0 } else { 1.5 };
-            if rng.gen_bool(0.01) { state.wind_target = rng.gen_range(-wind_limit..wind_limit); }
+            if rng.gen_bool(0.01) { 
+                state.wind_target = rng.gen_range(-wind_limit..wind_limit); 
+            }
             state.wind_force += (state.wind_target - state.wind_force) * 0.02;
 
             for drop in &mut state.drops {
                 drop.update(2000.0, 1100.0, state.wind_force, state.mode); 
             }
 
-            // 2. Thunderstorm specific logic
+            // 2. Thunderstorm logic
             if state.mode == Mode::Thunderstorm {
                 if let Some(strike) = &mut state.lightning {
                     strike.opacity -= 0.04;
                     strike.flash_intensity *= 0.85;
-                    
-                    // Thunder Delay Simulation
                     strike.thunder_delay_timer -= 1.0;
+                    
                     if !strike.thunder_triggered && strike.thunder_delay_timer <= 0.0 {
                         if let Some(handle) = &state.stream_handle {
-                            let vol = state.config.volume;
-                            play_thunder(handle, vol);
+                            play_thunder(handle, state.config.volume, &state.asset_root);
                         }
                         strike.thunder_triggered = true;
                     }
@@ -183,19 +197,24 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     state.lightning = Some(generate_lightning());
                 }
             }
+            Task::none()
         }
-        _ => {} 
+        _ => Task::none(), 
     }
-    Task::none()
 }
 
-fn play_thunder(handle: &rodio::OutputStreamHandle, base_vol: f32) {
+fn play_thunder(handle: &rodio::OutputStreamHandle, base_vol: f32, asset_root: &std::path::Path) {
     let mut rng = thread_rng();
-    let files = ["assets/thunder1.mp3", "assets/thunder2.mp3"];
-    if let Ok(file) = File::open(files[rng.gen_range(0..files.len())]) {
+    let filenames = ["thunder1.mp3", "thunder2.mp3"];
+    let chosen = filenames[rng.gen_range(0..filenames.len())];
+    
+    // Construct path dynamically
+    let thunder_path = asset_root.join(chosen);
+
+    if let Ok(file) = File::open(thunder_path) {
         if let Ok(source) = Decoder::new(BufReader::new(file)) {
             let sink = Sink::try_new(handle).unwrap();
-            sink.set_speed(rng.gen_range(0.7..1.2)); // Pitch variation
+            sink.set_speed(rng.gen_range(0.7..1.2));
             sink.set_volume(rng.gen_range(base_vol..base_vol * 2.5));
             sink.append(source);
             sink.detach();
@@ -208,15 +227,10 @@ fn generate_lightning() -> LightningStrike {
     let mut path = Vec::new();
     let mut curr = Point::new(rng.gen_range(200.0..1800.0), 0.0);
     path.push(curr);
-
     while curr.y < 1100.0 {
-        curr = Point::new(
-            curr.x + rng.gen_range(-100.0..100.0),
-            curr.y + rng.gen_range(40.0..130.0)
-        );
+        curr = Point::new(curr.x + rng.gen_range(-100.0..100.0), curr.y + rng.gen_range(40.0..130.0));
         path.push(curr);
     }
-
     LightningStrike { 
         path, opacity: 1.0, flash_intensity: 0.3, 
         thunder_triggered: false, 
@@ -228,8 +242,7 @@ fn subscription(_state: &State) -> Subscription<Message> {
     time::every(Duration::from_millis(16)).map(Message::Tick)
 }
 
-
-fn view(state: &State) -> Element<Message> {
+fn view(state: &State) -> Element<'_, Message> {
     canvas(state).width(Fill).height(Fill).into()
 }
 
@@ -237,13 +250,9 @@ impl<Message> canvas::Program<Message> for State {
     type State = ();
     fn draw(&self, _s: &(), renderer: &Renderer, _t: &Theme, bounds: Rectangle, _c: mouse::Cursor) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-
-        // 1. Lightning Flash
         if let Some(strike) = &self.lightning {
             let flash_rect = canvas::Path::rectangle(Point::ORIGIN, bounds.size());
             frame.fill(&flash_rect, Color::from_rgba(1.0, 1.0, 1.0, strike.flash_intensity));
-            
-            // 2. Lightning Bolt Geometry
             let mut builder = canvas::path::Builder::new();
             if let Some(first) = strike.path.first() {
                 builder.move_to(scale_pt(*first, bounds));
@@ -254,20 +263,16 @@ impl<Message> canvas::Program<Message> for State {
                 width: 2.0, ..Default::default()
             });
         }
-
-        // 3. Rain Drawing
         let rain_alpha = if self.mode == Mode::Thunderstorm { 0.4 } else { 0.3 };
         for drop in &self.drops {
             let x = (drop.x / 2000.0) * bounds.width;
             let y = (drop.y / 1100.0) * bounds.height;
-            // Draw lines based on actual velocity vectors
             let path = canvas::Path::line(Point::new(x, y), Point::new(x + drop.vx * 0.8, y + drop.vy * 0.5));
             frame.stroke(&path, canvas::Stroke {
                 style: canvas::Style::Solid(Color::from_rgba(0.8, 0.9, 1.0, rain_alpha)),
                 width: 0.8, ..Default::default()
             });
         }
-
         vec![frame.into_geometry()]
     }
 }
