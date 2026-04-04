@@ -27,10 +27,12 @@ To avoid a 10-minute compilation, use my Cachix cache:
 ### Arch (AUR)
 ```bash
 yay -S wrain-bin
+wrain --asset-path /usr/share/wrain/assets
 ```
 Or if you want to compile it:
 ```bash
 yay -S wrain-git
+wrain --asset-path /usr/share/wrain/assets
 ```
 
 ### Other (cargo build)
@@ -64,10 +66,10 @@ wrain
 --rain-density DENSITY (default 700)
 --rain-speed SPEED (default 1)
 --volume VOLUME (if sound is on, default 0.3)
---asset-path PATH (for non nix/arch install)
+--asset-path PATH (for non nix install)
 ```
 ## Disclamer
-Apologies if anything is broken, arch build is tested only in container
+Apologies if anything is broken, arch build is tested only in container and the code is not really good
 
 ## Contributing
 
