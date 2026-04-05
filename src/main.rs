@@ -8,12 +8,12 @@ use iced_layershell::application;
 use iced_layershell::reexport::{Anchor, Layer};
 use iced_layershell::settings::{LayerShellSettings, Settings};
 use iced_layershell::to_layer_message;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use rand::{thread_rng, Rng};
 use rodio::{Decoder, OutputStream, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "GPU Accelerated Rain Wallpaper for Wayland")]
@@ -32,6 +32,15 @@ struct Config {
 
     #[arg(long, default_value_t = 0.3)]
     volume: f32,
+
+    #[arg(long, default_value_t = 0.3)]
+    rain_opacity: f32,
+
+    #[arg(long, default_value_t = false)]
+    no_lightning: bool,
+
+    #[arg(long, default_value_t = false)]
+    no_thunder: bool,
 
     #[arg(long)]
     asset_path: Option<String>,
@@ -73,7 +82,7 @@ struct State {
 
     _audio_stream: Option<OutputStream>,
     stream_handle: Option<rodio::OutputStreamHandle>,
-    rain_sink: Option<Sink>,
+    _rain_sink: Option<Sink>,
 }
 
 struct LightningStrike {
@@ -109,28 +118,31 @@ impl RainDrop {
 #[to_layer_message]
 #[derive(Debug, Clone)]
 enum Message {
-    Tick(Instant),
+    Tick,
 }
 
 fn init(config: Config) -> (State, Task<Message>) {
     let mode = if config.mode == "thunderstorm" { Mode::Thunderstorm } else { Mode::Basic };
     
-    let asset_root = PathBuf::from(
-        config.asset_path.clone()
-            .or_else(|| std::env::var("WRAIN_ASSET_PATH").ok())
-            .unwrap_or_else(|| "assets".to_string())
-    );
+    let asset_root = if let Some(path) = config.asset_path.clone() {
+        PathBuf::from(path)
+    } else if let Ok(path) = std::env::var("WRAIN_ASSET_PATH") {
+        PathBuf::from(path)
+    } else if Path::new("/usr/share/wrain/assets").exists() {
+        PathBuf::from("/usr/share/wrain/assets")
+    } else if Path::new("/usr/local/share/wrain/assets").exists() {
+        PathBuf::from("/usr/local/share/wrain/assets")
+    } else {
+        PathBuf::from("assets")
+    };
 
-    // Audio Setup
     let mut _audio_stream = None;
     let mut stream_handle = None;
-    let mut rain_sink = None;
+    let mut _rain_sink = None;
 
     if !config.no_sound {
         if let Ok((stream, handle)) = OutputStream::try_default() {
             let sink = Sink::try_new(&handle).unwrap();
-            
-            // Construct path dynamically
             let rain_file = asset_root.join("rain_loop.mp3");
             
             if let Ok(file) = File::open(rain_file) {
@@ -141,7 +153,7 @@ fn init(config: Config) -> (State, Task<Message>) {
             }
             _audio_stream = Some(stream);
             stream_handle = Some(handle);
-            rain_sink = Some(sink);
+            _rain_sink = Some(sink);
         }
     }
 
@@ -156,16 +168,14 @@ fn init(config: Config) -> (State, Task<Message>) {
     (State { 
         config, mode, drops, wind_force: 0.0, wind_target: 0.0, lightning: None,
         asset_root,
-        _audio_stream, stream_handle, rain_sink,
+        _audio_stream, stream_handle, _rain_sink,
     }, Task::none())
 }
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::Tick(_) => {
+        Message::Tick => {
             let mut rng = thread_rng();
-            
-            // 1. Organic Wind Logic
             let wind_limit = if state.mode == Mode::Thunderstorm { 6.0 } else { 1.5 };
             if rng.gen_bool(0.01) { 
                 state.wind_target = rng.gen_range(-wind_limit..wind_limit); 
@@ -176,7 +186,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 drop.update(2000.0, 1100.0, state.wind_force, state.mode); 
             }
 
-            // 2. Thunderstorm logic
             if state.mode == Mode::Thunderstorm {
                 if let Some(strike) = &mut state.lightning {
                     strike.opacity -= 0.04;
@@ -184,8 +193,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     strike.thunder_delay_timer -= 1.0;
                     
                     if !strike.thunder_triggered && strike.thunder_delay_timer <= 0.0 {
-                        if let Some(handle) = &state.stream_handle {
-                            play_thunder(handle, state.config.volume, &state.asset_root);
+                        if !state.config.no_thunder {
+                            if let Some(handle) = &state.stream_handle {
+                                play_thunder(handle, state.config.volume, &state.asset_root);
+                            }
                         }
                         strike.thunder_triggered = true;
                     }
@@ -207,8 +218,6 @@ fn play_thunder(handle: &rodio::OutputStreamHandle, base_vol: f32, asset_root: &
     let mut rng = thread_rng();
     let filenames = ["thunder1.mp3", "thunder2.mp3"];
     let chosen = filenames[rng.gen_range(0..filenames.len())];
-    
-    // Construct path dynamically
     let thunder_path = asset_root.join(chosen);
 
     if let Ok(file) = File::open(thunder_path) {
@@ -239,7 +248,7 @@ fn generate_lightning() -> LightningStrike {
 }
 
 fn subscription(_state: &State) -> Subscription<Message> {
-    time::every(Duration::from_millis(16)).map(Message::Tick)
+    time::every(Duration::from_millis(16)).map(|_| Message::Tick)
 }
 
 fn view(state: &State) -> Element<'_, Message> {
@@ -250,20 +259,24 @@ impl<Message> canvas::Program<Message> for State {
     type State = ();
     fn draw(&self, _s: &(), renderer: &Renderer, _t: &Theme, bounds: Rectangle, _c: mouse::Cursor) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        if let Some(strike) = &self.lightning {
-            let flash_rect = canvas::Path::rectangle(Point::ORIGIN, bounds.size());
-            frame.fill(&flash_rect, Color::from_rgba(1.0, 1.0, 1.0, strike.flash_intensity));
-            let mut builder = canvas::path::Builder::new();
-            if let Some(first) = strike.path.first() {
-                builder.move_to(scale_pt(*first, bounds));
-                for pt in strike.path.iter().skip(1) { builder.line_to(scale_pt(*pt, bounds)); }
+        
+        if !self.config.no_lightning {
+            if let Some(strike) = &self.lightning {
+                let flash_rect = canvas::Path::rectangle(Point::ORIGIN, bounds.size());
+                frame.fill(&flash_rect, Color::from_rgba(1.0, 1.0, 1.0, strike.flash_intensity));
+                let mut builder = canvas::path::Builder::new();
+                if let Some(first) = strike.path.first() {
+                    builder.move_to(scale_pt(*first, bounds));
+                    for pt in strike.path.iter().skip(1) { builder.line_to(scale_pt(*pt, bounds)); }
+                }
+                frame.stroke(&builder.build(), canvas::Stroke {
+                    style: canvas::Style::Solid(Color::from_rgba(0.9, 0.9, 1.0, strike.opacity)),
+                    width: 2.0, ..Default::default()
+                });
             }
-            frame.stroke(&builder.build(), canvas::Stroke {
-                style: canvas::Style::Solid(Color::from_rgba(0.9, 0.9, 1.0, strike.opacity)),
-                width: 2.0, ..Default::default()
-            });
         }
-        let rain_alpha = if self.mode == Mode::Thunderstorm { 0.4 } else { 0.3 };
+
+        let rain_alpha = self.config.rain_opacity;
         for drop in &self.drops {
             let x = (drop.x / 2000.0) * bounds.width;
             let y = (drop.y / 1100.0) * bounds.height;

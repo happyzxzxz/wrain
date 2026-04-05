@@ -27,12 +27,10 @@ To avoid a 10-minute compilation, use my Cachix cache:
 ### Arch (AUR)
 ```bash
 yay -S wrain-bin
-wrain --asset-path /usr/share/wrain/assets
 ```
 Or if you want to compile it:
 ```bash
 yay -S wrain-git
-wrain --asset-path /usr/share/wrain/assets
 ```
 
 ### Other (cargo build)
@@ -62,9 +60,12 @@ wrain
 ### Options
 ```bash
 --mode MODE (basic or thunderstorm, default basic)
+--no-thunder (disables thunder sound in thunderstorm mode)
+--no-lightning (disables lightning in thunderstorm mode)
 --no-sound (disables sound)
 --rain-density DENSITY (default 700)
 --rain-speed SPEED (default 1)
+--rain-opacity OPACITY (default 0.3)
 --volume VOLUME (if sound is on, default 0.3)
 --asset-path PATH (for non nix install)
 ```
