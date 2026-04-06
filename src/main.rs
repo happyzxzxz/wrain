@@ -1,5 +1,6 @@
 use clap::Parser;
 use iced::widget::canvas;
+use iced::widget::container;
 use iced::{
     mouse, Color, Element, Fill, Point, Rectangle, Renderer, Subscription, Theme, 
     time, Task
@@ -77,8 +78,9 @@ struct State {
     wind_force: f32,
     wind_target: f32,
     lightning: Option<LightningStrike>,
-
     asset_root: PathBuf,
+
+    canvas_cache: canvas::Cache,
 
     _audio_stream: Option<OutputStream>,
     stream_handle: Option<rodio::OutputStreamHandle>,
@@ -124,6 +126,7 @@ enum Message {
 fn init(config: Config) -> (State, Task<Message>) {
     let mode = if config.mode == "thunderstorm" { Mode::Thunderstorm } else { Mode::Basic };
     
+    // Automatic Asset Discovery (CLI -> Env -> System -> Local)
     let asset_root = if let Some(path) = config.asset_path.clone() {
         PathBuf::from(path)
     } else if let Ok(path) = std::env::var("WRAIN_ASSET_PATH") {
@@ -168,6 +171,7 @@ fn init(config: Config) -> (State, Task<Message>) {
     (State { 
         config, mode, drops, wind_force: 0.0, wind_target: 0.0, lightning: None,
         asset_root,
+        canvas_cache: canvas::Cache::default(),
         _audio_stream, stream_handle, _rain_sink,
     }, Task::none())
 }
@@ -208,13 +212,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     state.lightning = Some(generate_lightning());
                 }
             }
+            state.canvas_cache.clear();
             Task::none()
         }
         _ => Task::none(), 
     }
 }
 
-fn play_thunder(handle: &rodio::OutputStreamHandle, base_vol: f32, asset_root: &std::path::Path) {
+fn play_thunder(handle: &rodio::OutputStreamHandle, base_vol: f32, asset_root: &Path) {
     let mut rng = thread_rng();
     let filenames = ["thunder1.mp3", "thunder2.mp3"];
     let chosen = filenames[rng.gen_range(0..filenames.len())];
@@ -252,41 +257,66 @@ fn subscription(_state: &State) -> Subscription<Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    canvas(state).width(Fill).height(Fill).into()
+    container(canvas(state)
+        .width(Fill)
+        .height(Fill))
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(Color::TRANSPARENT)),
+            ..Default::default()
+        })
+        .into()
 }
 
 impl<Message> canvas::Program<Message> for State {
     type State = ();
     fn draw(&self, _s: &(), renderer: &Renderer, _t: &Theme, bounds: Rectangle, _c: mouse::Cursor) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        
-        if !self.config.no_lightning {
-            if let Some(strike) = &self.lightning {
-                let flash_rect = canvas::Path::rectangle(Point::ORIGIN, bounds.size());
-                frame.fill(&flash_rect, Color::from_rgba(1.0, 1.0, 1.0, strike.flash_intensity));
-                let mut builder = canvas::path::Builder::new();
-                if let Some(first) = strike.path.first() {
-                    builder.move_to(scale_pt(*first, bounds));
-                    for pt in strike.path.iter().skip(1) { builder.line_to(scale_pt(*pt, bounds)); }
+        let geometry = self.canvas_cache.draw(renderer, bounds.size(), |frame| {
+            // 1. Visual Lightning
+            if !self.config.no_lightning {
+                if let Some(strike) = &self.lightning {
+                    let flash_alpha = strike.flash_intensity.clamp(0.0, 1.0);
+                    let strike_alpha = strike.opacity.clamp(0.0, 1.0);
+
+                    let flash_rect = canvas::Path::rectangle(Point::ORIGIN, bounds.size());
+                    frame.fill(&flash_rect, Color::from_rgba(1.0, 1.0, 1.0, flash_alpha));
+            
+                    let mut builder = canvas::path::Builder::new();
+                    if let Some(first) = strike.path.first() {
+                        builder.move_to(scale_pt(*first, bounds));
+                        for pt in strike.path.iter().skip(1) { 
+                            builder.line_to(scale_pt(*pt, bounds)); 
+                        }
+                    }
+                    frame.stroke(&builder.build(), canvas::Stroke {
+                        style: canvas::Style::Solid(Color::from_rgba(0.9, 0.9, 1.0, strike_alpha)),
+                        width: 2.0, ..Default::default()
+                    });
                 }
-                frame.stroke(&builder.build(), canvas::Stroke {
-                    style: canvas::Style::Solid(Color::from_rgba(0.9, 0.9, 1.0, strike.opacity)),
-                    width: 2.0, ..Default::default()
+            }
+
+            // 2. Rain Drawing
+            let rain_alpha = self.config.rain_opacity.clamp(0.0, 1.0);
+            for drop in &self.drops {
+                let x = (drop.x / 2000.0) * bounds.width;
+                let y = (drop.y / 1100.0) * bounds.height;
+                
+                // PERFORMANCE TWEAK: Adding a tiny bit of angle (0.01) prevents 
+                // software renderers from hitting slow vertical-line paths.
+                let slant = if drop.vx.abs() < 0.01 { 0.01 } else { drop.vx * 0.8 };
+                
+                let path = canvas::Path::line(
+                    Point::new(x, y), 
+                    Point::new(x + slant, y + drop.vy * 0.5)
+                );
+                
+                frame.stroke(&path, canvas::Stroke {
+                    style: canvas::Style::Solid(Color::from_rgba(0.8, 0.9, 1.0, rain_alpha)),
+                    width: 0.8, ..Default::default()
                 });
             }
-        }
-
-        let rain_alpha = self.config.rain_opacity;
-        for drop in &self.drops {
-            let x = (drop.x / 2000.0) * bounds.width;
-            let y = (drop.y / 1100.0) * bounds.height;
-            let path = canvas::Path::line(Point::new(x, y), Point::new(x + drop.vx * 0.8, y + drop.vy * 0.5));
-            frame.stroke(&path, canvas::Stroke {
-                style: canvas::Style::Solid(Color::from_rgba(0.8, 0.9, 1.0, rain_alpha)),
-                width: 0.8, ..Default::default()
-            });
-        }
-        vec![frame.into_geometry()]
+        });
+        
+        vec![geometry]
     }
 }
 
@@ -295,5 +325,8 @@ fn scale_pt(p: Point, b: Rectangle) -> Point {
 }
 
 fn style(_s: &State, _t: &Theme) -> iced::theme::Style {
-    iced::theme::Style { background_color: Color::TRANSPARENT, text_color: Color::WHITE }
+    iced::theme::Style { 
+        background_color: Color::TRANSPARENT, 
+        text_color: Color::WHITE 
+    }
 }
